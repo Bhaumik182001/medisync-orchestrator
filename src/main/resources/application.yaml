@@ -1,0 +1,20 @@
+server:
+  port: 8083
+
+spring:
+  application:
+    name: medisync-orchestrator
+  datasource:
+    url: jdbc:postgresql://127.0.0.1:5432/medisync_orchestrator
+    username: postgres
+    password: rootpassword
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update  
+
+services:
+  identity:
+    url: http://localhost:8081
+  core:
+    url: http://localhost:8082
