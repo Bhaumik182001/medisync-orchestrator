@@ -12,9 +12,32 @@ spring:
   jpa:
     hibernate:
       ddl-auto: update  
-
+  
 services:
   identity:
     url: http://localhost:8081
   core:
     url: http://localhost:8082
+
+management:
+  endpoints:
+    web: 
+      exposure:
+        include: health,metrics
+  health:
+    circuitbreakers:
+      enabled: true
+
+resilience4j:
+  circuitbreaker:
+    instances:
+      coreService:
+        sliding-window-size: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 10s
+        permitted-number-of-calls-in-half-open-state: 3
+  retry:
+    instances:
+      coreService:
+        max-attempts: 2
+        wait-duration: 500ms
