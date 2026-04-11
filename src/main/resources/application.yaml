@@ -5,19 +5,24 @@ spring:
   application:
     name: medisync-orchestrator
   datasource:
-    url: jdbc:postgresql://127.0.0.1:5432/medisync_orchestrator
+    url: jdbc:postgresql://postgres-core:5432/medisync_core
     username: postgres
     password: rootpassword
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
       ddl-auto: update
+  rabbitmq:
+    host: rabbitmq 
+    port: 5672
+    username: guest
+    password: guest
 
 services:
   identity:
-    url: http://localhost:8081
+    url: http://identity-service:8081
   core:
-    url: http://localhost:8082
+    url: http://core-service:8082 
 
 resilience4j:
   circuitbreaker:
@@ -39,7 +44,7 @@ management:
       exposure:
         include: health,metrics,info
       cors:
-        allowed-origins: "http://localhost:5173"
+        allowed-origins: "http://localhost:5173" 
         allowed-methods: "GET, POST, OPTIONS"
         allowed-headers: "*"
         allow-credentials: true

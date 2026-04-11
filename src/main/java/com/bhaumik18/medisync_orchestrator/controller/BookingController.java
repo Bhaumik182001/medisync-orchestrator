@@ -53,9 +53,7 @@ public class BookingController {
         return ResponseEntity.ok(result);
     }
 
-    // --- HELPER METHOD TO DECODE JWT ---
- // --- HELPER METHOD TO DECODE JWT ---
- // --- HELPER METHOD TO DECODE JWT (ZERO DEPENDENCIES) ---
+
     private String extractEmailFromJwt(String authHeader) {
         try {
             // 1. Remove "Bearer " prefix

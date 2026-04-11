@@ -2,6 +2,7 @@ package com.bhaumik18.medisync_orchestrator.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -35,20 +36,20 @@ public class BookingOrchestratorService {
     private final RetryRegistry retryRegistry;
     private final StringRedisTemplate redisTemplate;
 
+    // Inject the URL from application.yml
+    @Value("${services.core.url}")
+    private String coreServiceBaseUrl;
+
     
     public String orchestrateBooking(String authHeader, Long timeSlotId, String patientEmail) {
-    	String mdcTraceId = MDC.get("traceId");
-        System.out.println("\n-------------------------------------------------------");
+        String mdcTraceId = MDC.get("traceId");
         log.info(">>> [SERVICE START] Inside orchestrateBooking. MDC Trace ID: {}", mdcTraceId != null ? mdcTraceId : "NULL");
-        System.out.println("-------------------------------------------------------\n");
-    	log.info(">>> Orchestrator intercepting request. Forwarding to Core Service... <<<");
+        log.info(">>> Orchestrator intercepting request. Forwarding to Core Service... <<<");
         
         BookingTransaction saga = BookingTransaction.builder()
                 .timeSlotId(timeSlotId)
                 .status("PENDING")
                 .build();
-        
-        
         
         saga = transactionRepository.save(saga);
         
@@ -60,10 +61,10 @@ public class BookingOrchestratorService {
                 String threadTraceId = MDC.get("traceId");
                 log.info(">>> [INSIDE NETWORK THREAD] Preparing RestClient. MDC Trace ID: {}", threadTraceId != null ? threadTraceId : "NULL");
                 
-                
+               
                 coreServiceClient.put()
-                     .uri("http://localhost:8082/api/v1/schedules/slots/" + timeSlotId + "/book")
-                     .header(HttpHeaders.AUTHORIZATION, authHeader) // Forwards the JWT!
+                     .uri(coreServiceBaseUrl + "/api/v1/schedules/slots/" + timeSlotId + "/book")
+                     .header(HttpHeaders.AUTHORIZATION, authHeader) 
                      .retrieve()
                      .toBodilessEntity();
             };
@@ -75,20 +76,19 @@ public class BookingOrchestratorService {
             transactionRepository.save(saga);
             
             log.info(">>> Contacting Payment Gateway...");
-            boolean paymentSuccess = new Random().nextBoolean();
+            boolean paymentSuccess = new Random().nextInt(100) < 90;
             
             if (paymentSuccess) {
-                try { Thread.sleep(4000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 log.info(">>> Payment APPROVED.");
             } else {
-                try { Thread.sleep(8000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                throw new RuntimeException("Payment Gateway Declined the card after 8-second fraud check");
+                throw new RuntimeException("Payment Gateway Declined the card");
             }
             
             saga.setStatus("CONFIRMED");
             transactionRepository.save(saga);
             
-            AppointmentCreatedEvent event = new AppointmentCreatedEvent("patient@email.com", timeSlotId);
+            AppointmentCreatedEvent event = new AppointmentCreatedEvent(patientEmail, timeSlotId);
             
             rabbitTemplate.convertAndSend(
                     com.bhaumik18.medisync_orchestrator.config.RabbitMQConfig.EXCHANGE_NAME,
@@ -96,7 +96,7 @@ public class BookingOrchestratorService {
                     event
             );
             
-            log.info(">>> [MAIN THREAD] Fired async email event to RabbitMQ for {}! Returning response.", patientEmail);
+            log.info(">>> [MAIN THREAD] Fired async email event to RabbitMQ for {}!", patientEmail);
             return "SUCCESS: Appointment completely finalized!";
             
         } catch(CallNotPermittedException e) {
@@ -106,7 +106,7 @@ public class BookingOrchestratorService {
         } catch(Exception e) {
             log.error(">>> CRITICAL FAILURE: {} Triggering Compensating Transaction... <<<", e.getMessage());
             
-            if("SLOT_LOCKED".equals(saga.getStatus()) || e.getMessage().contains("Payment")) {
+            if("SLOT_LOCKED".equals(saga.getStatus()) || (e.getMessage() != null && e.getMessage().contains("Payment"))) {
                 fireCompensatingTransaction(authHeader, timeSlotId);
                 saga.setStatus("COMPENSATED");
                 saga.setFailureReason("Payment failed, slot released: " + e.getMessage());
@@ -122,8 +122,9 @@ public class BookingOrchestratorService {
     }
     
     private void fireCompensatingTransaction(String authHeader, Long timeSlotId) {
+        
         coreServiceClient.delete()
-            .uri("/api/v1/appointments/cancel/" + timeSlotId)
+            .uri(coreServiceBaseUrl + "/api/v1/appointments/cancel/" + timeSlotId)
             .header(HttpHeaders.AUTHORIZATION, authHeader)
             .retrieve()
             .toBodilessEntity();
@@ -139,8 +140,9 @@ public class BookingOrchestratorService {
 
         try {
             Supplier<String> networkCall = () -> {
+                
                 return coreServiceClient.get()
-                        .uri("/api/v1/appointments/schedule/" + providerId)
+                        .uri(coreServiceBaseUrl + "/api/v1/appointments/schedule/" + providerId)
                         .header(HttpHeaders.AUTHORIZATION, authHeader)
                         .retrieve()
                         .body(String.class);
@@ -165,11 +167,9 @@ public class BookingOrchestratorService {
                 log.info(">>> ✅ CACHE HIT: Returning stale data to user.");
                 return cachedSchedule; 
             } else {
-                log.warn(">>> ❌ CACHE MISS: No data available in Redis.");
-                return "SERVICE DEGRADED: Live schedule is unavailable and no cached data exists.";
+                return "SERVICE DEGRADED: Live schedule is unavailable.";
             }
         } catch (Exception redisException) {
-            log.error(">>> 💥 CRITICAL: Redis cache is also unreachable!");
             return "SERVICE COMPLETELY DEGRADED.";
         }
     }
@@ -177,15 +177,13 @@ public class BookingOrchestratorService {
     public void orchestrateCancellation(String authHeader, Long timeSlotId, String patientEmail) {
         log.info(">>> Orchestrator: Canceling appointment for Slot {} by {} <<<", timeSlotId, patientEmail);
         
-        // 1. Tell Core Service to free the slot
-        // (Core Service will safely extract the email from the forwarded authHeader to verify ownership)
+      
         coreServiceClient.put()
-             .uri("http://localhost:8082/api/v1/schedules/slots/" + timeSlotId + "/cancel")
+             .uri(coreServiceBaseUrl + "/api/v1/schedules/slots/" + timeSlotId + "/cancel")
              .header(HttpHeaders.AUTHORIZATION, authHeader)
              .retrieve()
              .toBodilessEntity();
 
-        // 2. Fire Async Notification to RabbitMQ
         String cancelPayload = String.format("CANCELED_APPOINTMENT: Slot ID %d for %s", timeSlotId, patientEmail);
         
         rabbitTemplate.convertAndSend(
