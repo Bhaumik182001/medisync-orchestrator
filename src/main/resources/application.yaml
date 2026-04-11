@@ -11,22 +11,13 @@ spring:
     driver-class-name: org.postgresql.Driver
   jpa:
     hibernate:
-      ddl-auto: update  
-  
+      ddl-auto: update
+
 services:
   identity:
     url: http://localhost:8081
   core:
     url: http://localhost:8082
-
-management:
-  endpoints:
-    web: 
-      exposure:
-        include: health,metrics
-  health:
-    circuitbreakers:
-      enabled: true
 
 resilience4j:
   circuitbreaker:
@@ -41,3 +32,17 @@ resilience4j:
       coreService:
         max-attempts: 2
         wait-duration: 500ms
+
+management:
+  endpoints:
+    web: 
+      exposure:
+        include: health,metrics,info
+      cors:
+        allowed-origins: "http://localhost:5173"
+        allowed-methods: "GET, POST, OPTIONS"
+        allowed-headers: "*"
+        allow-credentials: true
+  health:
+    circuitbreakers:
+      enabled: true

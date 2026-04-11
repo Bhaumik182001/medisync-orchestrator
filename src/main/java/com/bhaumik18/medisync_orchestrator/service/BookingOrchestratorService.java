@@ -1,6 +1,7 @@
 package com.bhaumik18.medisync_orchestrator.service;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
@@ -20,7 +21,9 @@ import io.github.resilience4j.retry.RetryRegistry;
 import io.github.resilience4j.circuitbreaker.CircuitBreaker;
 import io.github.resilience4j.circuitbreaker.CircuitBreakerRegistry;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import org.slf4j.MDC;
 
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class BookingOrchestratorService {
@@ -30,19 +33,22 @@ public class BookingOrchestratorService {
     private final BookingTransactionRepository transactionRepository;
     private final CircuitBreakerRegistry circuitBreakerRegistry;
     private final RetryRegistry retryRegistry;
-    
-    // 1. Injected Redis for the Fallback Cache
     private final StringRedisTemplate redisTemplate;
+
     
-    // --- THE WRITE PATTERN (SAGA + CIRCUIT BREAKER + RETRY) ---
-    public String orchestrateBooking(String authHeader, Long timeSlotId) {
-        
-        System.out.println(">>> Orchestrator intercepting request. Forwarding to Core Service... <<<");
+    public String orchestrateBooking(String authHeader, Long timeSlotId, String patientEmail) {
+    	String mdcTraceId = MDC.get("traceId");
+        System.out.println("\n-------------------------------------------------------");
+        log.info(">>> [SERVICE START] Inside orchestrateBooking. MDC Trace ID: {}", mdcTraceId != null ? mdcTraceId : "NULL");
+        System.out.println("-------------------------------------------------------\n");
+    	log.info(">>> Orchestrator intercepting request. Forwarding to Core Service... <<<");
         
         BookingTransaction saga = BookingTransaction.builder()
                 .timeSlotId(timeSlotId)
                 .status("PENDING")
                 .build();
+        
+        
         
         saga = transactionRepository.save(saga);
         
@@ -50,44 +56,38 @@ public class BookingOrchestratorService {
             CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("coreService");
             Retry retry = retryRegistry.retry("coreService");
             
-            // 1. Create the raw network call
             Runnable networkCall = () -> {
-                 Map<String, Long> requestBody = Map.of("timeSlotId", timeSlotId);
-                 coreServiceClient.post()
-                     .uri("/api/v1/appointments/book")
-                     .header(HttpHeaders.AUTHORIZATION, authHeader)
-                     .contentType(MediaType.APPLICATION_JSON)
-                     .body(requestBody)
+                String threadTraceId = MDC.get("traceId");
+                log.info(">>> [INSIDE NETWORK THREAD] Preparing RestClient. MDC Trace ID: {}", threadTraceId != null ? threadTraceId : "NULL");
+                
+                // THE FIX: Use PUT, point to the correct Core endpoint, and we don't need a body
+                coreServiceClient.put()
+                     .uri("http://localhost:8082/api/v1/schedules/slots/" + timeSlotId + "/book")
+                     .header(HttpHeaders.AUTHORIZATION, authHeader) // Forwards the JWT!
                      .retrieve()
                      .toBodilessEntity();
             };
             
-            // 2. Wrap it in the Retry logic
             Runnable retriableCall = Retry.decorateRunnable(retry, networkCall);
-            
-            // 3. Wrap the Retriable call in the Circuit Breaker logic and execute
             circuitBreaker.executeRunnable(retriableCall);
             
             saga.setStatus("SLOT_LOCKED");
             transactionRepository.save(saga);
             
-            // 2. Simulate Payment with Variable Latency (4s Success / 8s Fraud Check)
-            System.out.println(">>> Contacting Payment Gateway...");
+            log.info(">>> Contacting Payment Gateway...");
             boolean paymentSuccess = new Random().nextBoolean();
             
             if (paymentSuccess) {
                 try { Thread.sleep(4000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
-                System.out.println(">>> Payment APPROVED.");
+                log.info(">>> Payment APPROVED.");
             } else {
                 try { Thread.sleep(8000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 throw new RuntimeException("Payment Gateway Declined the card after 8-second fraud check");
             }
             
-            // 3. Confirm Transaction
             saga.setStatus("CONFIRMED");
             transactionRepository.save(saga);
             
-            // 4. Fire Asynchronous Event
             AppointmentCreatedEvent event = new AppointmentCreatedEvent("patient@email.com", timeSlotId);
             
             rabbitTemplate.convertAndSend(
@@ -96,18 +96,16 @@ public class BookingOrchestratorService {
                     event
             );
             
-            System.out.println(">>> [MAIN THREAD] Fired async email event to RabbitMQ! Returning response to user.");
-            
+            log.info(">>> [MAIN THREAD] Fired async email event to RabbitMQ for {}! Returning response.", patientEmail);
             return "SUCCESS: Appointment completely finalized!";
             
         } catch(CallNotPermittedException e) {
-            System.out.println(">>> 🛑 CIRCUIT BREAKER TRIPPED! Core Service is unresponsive. <<<");
-            return "SERVICE DEGRADED: The booking system is currently experiencing high traffic. Please try again in a few moments.";
+            log.warn(">>> 🛑 CIRCUIT BREAKER TRIPPED! Core Service is unresponsive. <<<");
+            return "SERVICE DEGRADED: The booking system is currently experiencing high traffic.";
             
         } catch(Exception e) {
-            System.out.println(">>> CRITICAL FAILURE: " + e.getMessage() + " Triggering Compensating Transaction... <<<");
+            log.error(">>> CRITICAL FAILURE: {} Triggering Compensating Transaction... <<<", e.getMessage());
             
-            // Check if we need to compensate BEFORE we overwrite the status to FAILED
             if("SLOT_LOCKED".equals(saga.getStatus()) || e.getMessage().contains("Payment")) {
                 fireCompensatingTransaction(authHeader, timeSlotId);
                 saga.setStatus("COMPENSATED");
@@ -116,11 +114,9 @@ public class BookingOrchestratorService {
                 return "FAILED: Payment declined. The time slot has been safely released.";
             }
             
-            // If it failed before locking the slot (e.g. Core Service is down)
             saga.setStatus("FAILED");
             saga.setFailureReason(e.getMessage());
             transactionRepository.save(saga);
-            
             return "FAILED: Could not book appointment. " + e.getMessage();
         }
     }
@@ -132,18 +128,16 @@ public class BookingOrchestratorService {
             .retrieve()
             .toBodilessEntity();
         
-        System.out.println(">>> COMPENSATING TRANSACTION COMPLETE: Slot " + timeSlotId + " is free again. <<<");
+        log.info(">>> COMPENSATING TRANSACTION COMPLETE: Slot {} is free again. <<<", timeSlotId);
     }
 
-    // --- THE READ FALLBACK PATTERN (WITH RETRY) ---
     public String fetchProviderSchedule(Long providerId, String authHeader) {
-        System.out.println(">>> Orchestrator: Fetching schedule for Provider " + providerId + " <<<");
+        log.info(">>> Orchestrator: Fetching schedule for Provider {} <<<", providerId);
         
         CircuitBreaker circuitBreaker = circuitBreakerRegistry.circuitBreaker("coreService");
         Retry retry = retryRegistry.retry("coreService");
 
         try {
-            // 1. Define the network call returning a String
             Supplier<String> networkCall = () -> {
                 return coreServiceClient.get()
                         .uri("/api/v1/appointments/schedule/" + providerId)
@@ -152,40 +146,54 @@ public class BookingOrchestratorService {
                         .body(String.class);
             };
 
-            // 2. Wrap it in Retry
             Supplier<String> retriableCall = Retry.decorateSupplier(retry, networkCall);
-
-            // 3. Execute through the Circuit Breaker
             return circuitBreaker.executeSupplier(retriableCall);
             
-        } catch (CallNotPermittedException e) {
-            // The breaker is OPEN. Do not fail! Rescue the user with cached data.
-            return fallbackScheduleFromRedis(providerId, e);
         } catch (Exception e) {
-            // The breaker is CLOSED, but it failed/timed out after retrying.
             return fallbackScheduleFromRedis(providerId, e);
         }
     }
 
     private String fallbackScheduleFromRedis(Long providerId, Exception e) {
-        System.out.println(">>> 🛑 CIRCUIT BROKEN / TIMEOUT: Bypassing Core Service. <<<");
-        System.out.println(">>> 🟢 FALLBACK TRIGGERED: Attempting to fetch from Redis Cache... <<<");
+        log.warn(">>> 🛑 CIRCUIT BROKEN / TIMEOUT: Bypassing Core Service. <<<");
+        log.info(">>> 🟢 FALLBACK TRIGGERED: Attempting to fetch from Redis Cache... <<<");
         
         String redisKey = "provider_schedule:" + providerId;
-        
         try {
             String cachedSchedule = redisTemplate.opsForValue().get(redisKey);
-            
             if (cachedSchedule != null && !cachedSchedule.isEmpty()) {
-                System.out.println(">>> ✅ CACHE HIT: Returning stale data to user.");
+                log.info(">>> ✅ CACHE HIT: Returning stale data to user.");
                 return cachedSchedule; 
             } else {
-                System.out.println(">>> ❌ CACHE MISS: No data available in Redis.");
-                return "SERVICE DEGRADED: Live schedule is unavailable and no cached data exists. Please try again later.";
+                log.warn(">>> ❌ CACHE MISS: No data available in Redis.");
+                return "SERVICE DEGRADED: Live schedule is unavailable and no cached data exists.";
             }
         } catch (Exception redisException) {
-            System.out.println(">>> 💥 CRITICAL: Redis cache is also unreachable!");
-            return "SERVICE COMPLETELY DEGRADED: Both primary and fallback systems are currently offline.";
+            log.error(">>> 💥 CRITICAL: Redis cache is also unreachable!");
+            return "SERVICE COMPLETELY DEGRADED.";
         }
+    }
+
+    public void orchestrateCancellation(String authHeader, Long timeSlotId, String patientEmail) {
+        log.info(">>> Orchestrator: Canceling appointment for Slot {} by {} <<<", timeSlotId, patientEmail);
+        
+        // 1. Tell Core Service to free the slot
+        // (Core Service will safely extract the email from the forwarded authHeader to verify ownership)
+        coreServiceClient.put()
+             .uri("http://localhost:8082/api/v1/schedules/slots/" + timeSlotId + "/cancel")
+             .header(HttpHeaders.AUTHORIZATION, authHeader)
+             .retrieve()
+             .toBodilessEntity();
+
+        // 2. Fire Async Notification to RabbitMQ
+        String cancelPayload = String.format("CANCELED_APPOINTMENT: Slot ID %d for %s", timeSlotId, patientEmail);
+        
+        rabbitTemplate.convertAndSend(
+                com.bhaumik18.medisync_orchestrator.config.RabbitMQConfig.EXCHANGE_NAME,
+                com.bhaumik18.medisync_orchestrator.config.RabbitMQConfig.ROUTING_KEY,
+                cancelPayload
+        );
+        
+        log.info(">>> Cancellation complete. RabbitMQ notified for {}. <<<", patientEmail);
     }
 }
