@@ -60,7 +60,7 @@ public class BookingOrchestratorService {
                 String threadTraceId = MDC.get("traceId");
                 log.info(">>> [INSIDE NETWORK THREAD] Preparing RestClient. MDC Trace ID: {}", threadTraceId != null ? threadTraceId : "NULL");
                 
-                // THE FIX: Use PUT, point to the correct Core endpoint, and we don't need a body
+                
                 coreServiceClient.put()
                      .uri("http://localhost:8082/api/v1/schedules/slots/" + timeSlotId + "/book")
                      .header(HttpHeaders.AUTHORIZATION, authHeader) // Forwards the JWT!

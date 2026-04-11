@@ -39,3 +39,7 @@ target/
 .settings/
 .idea/
 *.jar
+
+# Repomix output
+repomix-output.xml
+repomix-output.txt
