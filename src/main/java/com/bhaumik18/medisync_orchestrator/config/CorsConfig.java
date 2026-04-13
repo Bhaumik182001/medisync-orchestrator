@@ -17,7 +17,7 @@ public class CorsConfig {
                         .allowedOrigins("http://localhost:5173", 
                                 "https://medisync-frontend-vert.vercel.app") // Allow your Vite frontend
                         .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS") // Allow standard methods + preflight
-                        .allowedHeaders("*") // Allow all headers (Crucial for passing your JWT Authorization header later)
+                        .allowedHeaders("*") 
                         .allowCredentials(true);
             }
         };
