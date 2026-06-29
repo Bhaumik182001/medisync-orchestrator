@@ -28,5 +28,8 @@ COPY --from=builder /build/target/*.jar app.jar
 
 EXPOSE 8083
 
+# Force the JVM onto a strict 256MB so Mac doesn't crash
+ENV JAVA_TOOL_OPTIONS="-Xms256m -Xmx256m"
+
 # Run the application
 ENTRYPOINT ["java", "-jar", "app.jar"]
